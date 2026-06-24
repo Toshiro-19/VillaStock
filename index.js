@@ -5,13 +5,13 @@ const cron = require("node-cron");
 const sharp = require("sharp");
 const crypto = require("crypto");
 const express = require("express");
-const fs = require("fs");
 const path = require("path");
 const cheerio = require("cheerio");
 const session = require('express-session');
 const FileStore = require('session-file-store')(session);
 const passport = require('passport');
 const DiscordStrategy = require('passport-discord').Strategy;
+const admin = require("firebase-admin"); // 🔥 FIREBASE AÑADIDO
 
 // ==========================================
 // 0. CONFIGURACIÓN GLOBAL Y LOGS
@@ -50,32 +50,50 @@ const SPECIAL_FRUIT_ROLES = {
 };
 
 // ==========================================
-// 1. INICIALIZACIÓN Y BASE DE DATOS
+// 1. INICIALIZACIÓN DE FIREBASE 
 // ==========================================
+let firestoreDb = null;
+try {
+    if (process.env.FIREBASE_CREDENTIALS) {
+        const serviceAccount = JSON.parse(process.env.FIREBASE_CREDENTIALS);
+        admin.initializeApp({
+            credential: admin.credential.cert(serviceAccount)
+        });
+        firestoreDb = admin.firestore();
+        log("🔥 Conectado exitosamente a Firebase Firestore");
+    } else {
+        log("⚠️ No se encontraron credenciales de Firebase en las variables de entorno.");
+    }
+} catch (error) {
+    log(`❌ Error crítico al iniciar Firebase: ${error.message}`);
+}
+
+async function readDb() {
+    if (!firestoreDb) return {};
+    try {
+        const snapshot = await firestoreDb.collection('configs').get();
+        let db = {};
+        snapshot.forEach(doc => {
+            db[doc.id] = doc.data();
+        });
+        return db;
+    } catch (e) {
+        log("Error leyendo Firebase: " + e.message);
+        return {};
+    }
+}
+
+async function writeDb(guildId, data) {
+    if (!firestoreDb) return;
+    try {
+        await firestoreDb.collection('configs').doc(guildId).set(data);
+    } catch (e) {
+        log("Error escribiendo en Firebase: " + e.message);
+    }
+}
+
 const app = express();
 app.set('trust proxy', 1);
-
-const dbPath = path.join(__dirname, 'db.json');
-
-function readDb() {
-    if (!fs.existsSync(dbPath)) {
-        fs.writeFileSync(dbPath, JSON.stringify({}));
-        return {};
-    }
-    const data = fs.readFileSync(dbPath, 'utf8');
-    try {
-        if (!data || data.trim() === "") throw new Error("Vacío");
-        return JSON.parse(data);
-    } catch (e) {
-        fs.writeFileSync(dbPath, JSON.stringify({}));
-        return {};
-    }
-}
-
-function writeDb(data) {
-    fs.writeFileSync(dbPath, JSON.stringify(data, null, 2));
-}
-
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 // ==========================================
@@ -98,8 +116,7 @@ passport.deserializeUser((obj, done) => done(null, obj));
 passport.use(new DiscordStrategy({
     clientID: process.env.CLIENT_ID,
     clientSecret: process.env.CLIENT_SECRET,
-    // 🌟 AJUSTE NUBE: Usamos variable de entorno para la URL de retorno
-    callbackURL: process.env.CALLBACK_URL || 'http://localhost:3000/dashboard', 
+    callbackURL: process.env.CALLBACK_URL, 
     scope: ['identify', 'guilds']
 }, (accessToken, refreshToken, profile, done) => {
     return done(null, profile);
@@ -184,7 +201,7 @@ app.get("/config/:guildId", checkAuth, async (req, res) => {
     const userGuild = req.user.guilds.find(g => g.id === guildId && (g.permissions & 8) === 8);
     if (!userGuild) return res.status(403).send("Acceso Denegado");
 
-    const db = readDb();
+    const db = await readDb(); // 🔥 AHORA LEE DE FIREBASE
     const config = db[guildId] || { seedChannelId: "", fruitChannelId: "", roleMap: {} };
     const guild = client.guilds.cache.get(guildId);
     if (!guild) return res.redirect('/dashboard');
@@ -291,14 +308,13 @@ app.get("/config/:guildId", checkAuth, async (req, res) => {
     `);
 });
 
-app.post("/save", checkAuth, (req, res) => {
+app.post("/save", checkAuth, async (req, res) => {
     const body = req.body;
     const guildId = body.guildId;
 
     const userGuild = req.user.guilds.find(g => g.id === guildId && (g.permissions & 8) === 8);
     if (!userGuild) return res.status(403).send("No autorizado.");
 
-    const db = readDb();
     const roleMap = {};
     for (const key in body) {
         if (key.startsWith("role_") && body[key] !== "") {
@@ -306,18 +322,17 @@ app.post("/save", checkAuth, (req, res) => {
         }
     }
 
-    db[guildId] = { seedChannelId: body.seedChannelId, fruitChannelId: body.fruitChannelId, roleMap: roleMap };
-    writeDb(db);
+    // 🔥 GUARDA DIRECTAMENTE EN FIREBASE
+    await writeDb(guildId, { seedChannelId: body.seedChannelId, fruitChannelId: body.fruitChannelId, roleMap: roleMap });
 
     res.send(`
         <body style="background:#1e1f22; color:white; font-family:sans-serif; text-align:center; padding:50px;">
-            <h2 style="color:#57F287;">¡Guardado con éxito!</h2>
+            <h2 style="color:#57F287;">¡Guardado con éxito en Firebase!</h2>
             <script>setTimeout(()=>window.location.href = '/config/${guildId}', 1200)</script>
         </body>
     `);
 });
 
-// 🌟 AJUSTE NUBE: Render inyecta su propio puerto dinámicamente aquí
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
     log(`🌐 Servidor web activo en puerto: ${PORT}`);
@@ -403,9 +418,14 @@ async function generateCard(title, color, items, type) {
 }
 
 async function sendStock(channelId, buffer, filename, roleMap, items) {
-    if (!channelId) return;
+    if (!channelId) return false;
+    
+    // 🔥 AQUÍ ARREGLAMOS EL BUG QUE TE MENTÍA
     const channel = await client.channels.fetch(channelId).catch(() => null);
-    if (!channel) return;
+    if (!channel) {
+        log(`❌ ERROR: No se encontró el canal ID [${channelId}]. El bot no está en ese canal o no tiene permisos.`);
+        return false;
+    }
 
     const matchedRoleIds = [];
 
@@ -417,10 +437,16 @@ async function sendStock(channelId, buffer, filename, roleMap, items) {
 
     const mentions = [...new Set(matchedRoleIds)].map(id => `<@&${id}>`).join(" ");
     
-    await channel.send({
-        content: mentions || "¡Nuevo Stock Disponible!",
-        files: [new AttachmentBuilder(buffer, { name: filename })]
-    });
+    try {
+        await channel.send({
+            content: mentions || "¡Nuevo Stock Disponible!",
+            files: [new AttachmentBuilder(buffer, { name: filename })]
+        });
+        return true; // Envío exitoso
+    } catch (err) {
+        log(`❌ ERROR al enviar mensaje en [${channel.name}]: ${err.message}`);
+        return false;
+    }
 }
 
 // --- Procesadores de Grupos con Manejo de Errores ---
@@ -431,10 +457,12 @@ async function checkSeeds(config, guildId, seeds) {
         if (lastSeedHashes[guildId] === hash) return;
 
         const card = await generateCard("🌱 Semillas en Stock", "#f1a524", seeds.map(s => ({ prefix: `${s.lastQty || 1}x`, name: s.name })), "seed");
-        await sendStock(config.seedChannelId, card, "seeds.png", config.roleMap, seeds);
+        const sent = await sendStock(config.seedChannelId, card, "seeds.png", config.roleMap, seeds);
         
-        lastSeedHashes[guildId] = hash;
-        log(`✅ Semillas enviadas al servidor: ${guildId}`);
+        if (sent) { // 🔥 SOLO GUARDA EL HASH Y LANZA LOG SI REALMENTE SE ENVIÓ
+            lastSeedHashes[guildId] = hash;
+            log(`✅ Semillas enviadas al servidor: ${guildId}`);
+        }
     } catch (e) { log(`❌ Error Semillas Guild ${guildId}: ${e.message}`); }
 }
 
@@ -445,15 +473,17 @@ async function checkFruits(config, guildId, allFruits) {
         if (lastFruitHashes[guildId] === hash) return;
 
         const card = await generateCard("🍎 Frutas en Stock", "#ff4757", allFruits, "fruit");
-        await sendStock(config.fruitChannelId, card, "fruits.png", config.roleMap, allFruits);
+        const sent = await sendStock(config.fruitChannelId, card, "fruits.png", config.roleMap, allFruits);
         
-        lastFruitHashes[guildId] = hash;
-        log(`✅ Frutas enviadas al servidor: ${guildId}`);
+        if (sent) {
+            lastFruitHashes[guildId] = hash;
+            log(`✅ Frutas enviadas al servidor: ${guildId}`);
+        }
     } catch (e) { log(`❌ Error Frutas Guild ${guildId}: ${e.message}`); }
 }
 
 async function monitor() {
-    const db = readDb();
+    const db = await readDb(); // 🔥 AHORA LEE DE FIREBASE
     const guildIds = Object.keys(db);
     if (guildIds.length === 0) return;
 
@@ -504,7 +534,7 @@ async function monitor() {
     }
 
     if (globalSeeds.length === 0 && globalFruits.length === 0) {
-        log("🛡️ Las webs devolvieron 0 items. Abortando actualización para prevenir limpieza de stock.");
+        log("🛡️ Las webs devolvieron 0 items. Abortando actualización.");
         return;
     }
 
