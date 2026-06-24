@@ -5,13 +5,16 @@ const cron = require("node-cron");
 const sharp = require("sharp");
 const crypto = require("crypto");
 const express = require("express");
+const fs = require("fs");
 const path = require("path");
 const cheerio = require("cheerio");
 const session = require('express-session');
 const FileStore = require('session-file-store')(session);
 const passport = require('passport');
 const DiscordStrategy = require('passport-discord').Strategy;
-const { initializeApp, cert } = require("firebase-admin/app"); // 🔥 Importación moderna
+
+// 🔥 IMPORTACIÓN MODERNA DE FIREBASE
+const { initializeApp, cert } = require("firebase-admin/app");
 const { getFirestore } = require("firebase-admin/firestore");
 
 // ==========================================
@@ -51,19 +54,21 @@ const SPECIAL_FRUIT_ROLES = {
 };
 
 // ==========================================
-// 1. INICIALIZACIÓN DE FIREBASE 
+// 1. INICIALIZACIÓN Y BASE DE DATOS (FIREBASE)
 // ==========================================
+const app = express();
+app.set('trust proxy', 1);
+
 let firestoreDb = null;
 try {
     if (process.env.FIREBASE_CREDENTIALS) {
         const serviceAccount = JSON.parse(process.env.FIREBASE_CREDENTIALS);
         
-        // 🔥 Inicialización moderna directa
         initializeApp({
             credential: cert(serviceAccount)
         });
         
-        firestoreDb = getFirestore(); // Obtiene la base de datos de forma directa
+        firestoreDb = getFirestore();
         log("🔥 Conectado exitosamente a Firebase Firestore");
     } else {
         log("⚠️ No se encontraron credenciales de Firebase en las variables de entorno.");
@@ -72,32 +77,42 @@ try {
     log(`❌ Error crítico al iniciar Firebase: ${error.message}`);
 }
 
-async function readDb() {
+// Funciones auxiliares para interactuar con Firestore
+async function getGuildConfig(guildId) {
+    if (!firestoreDb) return null;
+    try {
+        const doc = await firestoreDb.collection("servers").doc(guildId).get();
+        return doc.exists ? doc.data() : null;
+    } catch (e) {
+        log(`❌ Error leyendo de Firebase: ${e.message}`);
+        return null;
+    }
+}
+
+async function saveGuildConfig(guildId, config) {
+    if (!firestoreDb) return;
+    try {
+        await firestoreDb.collection("servers").doc(guildId).set(config);
+    } catch (e) {
+        log(`❌ Error escribiendo en Firebase: ${e.message}`);
+    }
+}
+
+async function getAllGuildConfigs() {
     if (!firestoreDb) return {};
     try {
-        const snapshot = await firestoreDb.collection('configs').get();
-        let db = {};
+        const snapshot = await firestoreDb.collection("servers").get();
+        const db = {};
         snapshot.forEach(doc => {
             db[doc.id] = doc.data();
         });
         return db;
     } catch (e) {
-        log("Error leyendo Firebase: " + e.message);
+        log(`❌ Error obteniendo todas las configs de Firebase: ${e.message}`);
         return {};
     }
 }
 
-async function writeDb(guildId, data) {
-    if (!firestoreDb) return;
-    try {
-        await firestoreDb.collection('configs').doc(guildId).set(data);
-    } catch (e) {
-        log("Error escribiendo en Firebase: " + e.message);
-    }
-}
-
-const app = express();
-app.set('trust proxy', 1);
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 // ==========================================
@@ -205,8 +220,8 @@ app.get("/config/:guildId", checkAuth, async (req, res) => {
     const userGuild = req.user.guilds.find(g => g.id === guildId && (g.permissions & 8) === 8);
     if (!userGuild) return res.status(403).send("Acceso Denegado");
 
-    const db = await readDb(); // 🔥 AHORA LEE DE FIREBASE
-    const config = db[guildId] || { seedChannelId: "", fruitChannelId: "", roleMap: {} };
+    // 🔥 CORREGIDO: AHORA SÍ CONECTA Y LEE DE FIREBASE
+    const config = await getGuildConfig(guildId) || { seedChannelId: "", fruitChannelId: "", roleMap: {} };
     const guild = client.guilds.cache.get(guildId);
     if (!guild) return res.redirect('/dashboard');
 
@@ -326,8 +341,8 @@ app.post("/save", checkAuth, async (req, res) => {
         }
     }
 
-    // 🔥 GUARDA DIRECTAMENTE EN FIREBASE
-    await writeDb(guildId, { seedChannelId: body.seedChannelId, fruitChannelId: body.fruitChannelId, roleMap: roleMap });
+    // 🔥 CORREGIDO: GUARDA DIRECTAMENTE EN FIREBASE USANDO NUESTRA FUNCIÓN DE AYUDA
+    await saveGuildConfig(guildId, { seedChannelId: body.seedChannelId, fruitChannelId: body.fruitChannelId, roleMap: roleMap });
 
     res.send(`
         <body style="background:#1e1f22; color:white; font-family:sans-serif; text-align:center; padding:50px;">
@@ -424,7 +439,6 @@ async function generateCard(title, color, items, type) {
 async function sendStock(channelId, buffer, filename, roleMap, items) {
     if (!channelId) return false;
     
-    // 🔥 AQUÍ ARREGLAMOS EL BUG QUE TE MENTÍA
     const channel = await client.channels.fetch(channelId).catch(() => null);
     if (!channel) {
         log(`❌ ERROR: No se encontró el canal ID [${channelId}]. El bot no está en ese canal o no tiene permisos.`);
@@ -446,7 +460,7 @@ async function sendStock(channelId, buffer, filename, roleMap, items) {
             content: mentions || "¡Nuevo Stock Disponible!",
             files: [new AttachmentBuilder(buffer, { name: filename })]
         });
-        return true; // Envío exitoso
+        return true; 
     } catch (err) {
         log(`❌ ERROR al enviar mensaje en [${channel.name}]: ${err.message}`);
         return false;
@@ -463,7 +477,7 @@ async function checkSeeds(config, guildId, seeds) {
         const card = await generateCard("🌱 Semillas en Stock", "#f1a524", seeds.map(s => ({ prefix: `${s.lastQty || 1}x`, name: s.name })), "seed");
         const sent = await sendStock(config.seedChannelId, card, "seeds.png", config.roleMap, seeds);
         
-        if (sent) { // 🔥 SOLO GUARDA EL HASH Y LANZA LOG SI REALMENTE SE ENVIÓ
+        if (sent) { 
             lastSeedHashes[guildId] = hash;
             log(`✅ Semillas enviadas al servidor: ${guildId}`);
         }
@@ -487,7 +501,8 @@ async function checkFruits(config, guildId, allFruits) {
 }
 
 async function monitor() {
-    const db = await readDb(); // 🔥 AHORA LEE DE FIREBASE
+    // 🔥 CORREGIDO: AHORA SÍ RECOGE LA CONFIGURACIÓN GLOBAL DESDE FIREBASE FIRESTORE
+    const db = await getAllGuildConfigs();
     const guildIds = Object.keys(db);
     if (guildIds.length === 0) return;
 
