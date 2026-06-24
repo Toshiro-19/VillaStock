@@ -11,7 +11,8 @@ const session = require('express-session');
 const FileStore = require('session-file-store')(session);
 const passport = require('passport');
 const DiscordStrategy = require('passport-discord').Strategy;
-const admin = require("firebase-admin"); // 🔥 FIREBASE AÑADIDO
+const { initializeApp, cert } = require("firebase-admin/app"); // 🔥 Importación moderna
+const { getFirestore } = require("firebase-admin/firestore");
 
 // ==========================================
 // 0. CONFIGURACIÓN GLOBAL Y LOGS
@@ -56,10 +57,13 @@ let firestoreDb = null;
 try {
     if (process.env.FIREBASE_CREDENTIALS) {
         const serviceAccount = JSON.parse(process.env.FIREBASE_CREDENTIALS);
-        admin.initializeApp({
-            credential: admin.credential.cert(serviceAccount)
+        
+        // 🔥 Inicialización moderna directa
+        initializeApp({
+            credential: cert(serviceAccount)
         });
-        firestoreDb = admin.firestore();
+        
+        firestoreDb = getFirestore(); // Obtiene la base de datos de forma directa
         log("🔥 Conectado exitosamente a Firebase Firestore");
     } else {
         log("⚠️ No se encontraron credenciales de Firebase en las variables de entorno.");
