@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html>
+<body>
+    <h1>Configuración de VillaStock</h1>
+    <form action="/save-config" method="POST">
+        <input type="hidden" name="guildId" value="<%= guildId %>">
+        
+        <label>ID Canal Semillas:</label><br>
+        <input type="text" name="seedChannelId" value="<%= config.seedChannelId %>"><br><br>
+        
+        <label>ID Canal Frutas:</label><br>
+        <input type="text" name="fruitChannelId" value="<%= config.fruitChannelId %>"><br><br>
+        
+        <label>Roles (Formato: Tomato:1518..., Apple:1518...):</label><br>
+        <textarea name="roleMapText" rows="5" cols="40"><%= roleMapText %></textarea><br><br>
+        
+        <button type="submit">Guardar Configuración</button>
+    </form>
+</body>
+</html>

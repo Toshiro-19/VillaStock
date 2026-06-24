@@ -1,0 +1,12 @@
+<h1>Configuración de VillaStock</h1>
+<form action="/save-config" method="POST">
+    <input type="hidden" name="guildId" value="<%= guildId %>">
+    
+    <label>ID del Canal de Seeds:</label><br>
+    <input type="text" name="seedChannelId" required><br><br>
+    
+    <label>ID del Canal de Fruits:</label><br>
+    <input type="text" name="fruitChannelId" required><br><br>
+    
+    <button type="submit">Guardar Configuración</button>
+</form>
